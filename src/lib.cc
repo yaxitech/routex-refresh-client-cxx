@@ -1,0 +1,428 @@
+#include <iterator>
+#include <memory>
+#include <stdexcept>
+
+#include "routex-refresh-client-cxx/src/lib.rs.h"
+#include "yaxi/routex-refresh-client.h"
+
+using namespace std;
+using namespace yaxi::refresh::internal;
+
+namespace yaxi::refresh {
+namespace {
+template <typename T> inline unique_ptr<T> to_ptr(optional<T> opt) {
+    return opt ? make_unique<T>(std::move(*opt)) : nullptr;
+}
+
+yaxi::refresh::internal::AccountReference
+convert_account_reference(yaxi::refresh::AccountReference ref) {
+    return {ref.iban, to_ptr(ref.currency)};
+}
+
+inline unique_ptr<internal::UserInSession>
+to_user_in_session(const optional<UserInSession> &userInSession) {
+    return userInSession ? make_unique<internal::UserInSession>(
+                               internal::UserInSession{to_ptr(userInSession->ipAddress())})
+                         : nullptr;
+}
+
+template <typename U, typename T, typename F> vector<U> convert_vec(T const &in, F f) {
+    vector<U> out;
+    out.reserve(in.size());
+    transform(in.cbegin(), in.cend(), back_inserter(out), f);
+    return out;
+}
+
+inline vector<uint8_t> bytes(rust::Vec<uint8_t> const &bytes) {
+    return vector<uint8_t>(make_move_iterator(bytes.begin()), make_move_iterator(bytes.end()));
+}
+
+inline optional<vector<uint8_t>> optional_bytes(rust::Vec<uint8_t> const &b) {
+    return b.empty() ? nullopt : optional(bytes(b));
+}
+
+inline optional<string> optional_string(rust::String const &str) {
+    return str.empty() ? nullopt : optional(string(str));
+}
+
+template <typename T> inline optional<T> optional_code(unique_ptr<U8> const &val) {
+    return val ? optional(static_cast<T>(val->val)) : nullopt;
+}
+
+yaxi::refresh::ConnectionInfo
+convert_connection_info(yaxi::refresh::internal::ConnectionInfo info) {
+    return {
+        yaxi::refresh::ConnectionId(info.id),
+        convert_vec<string>(info.countries, [](rust::String c) { return string(c); }),
+        string(info.display_name),
+        {info.credentials_full, info.credentials_user, info.credentials_none},
+        optional_string(info.user_id),
+        optional_string(info.password),
+        optional_string(info.advice),
+        string(info.logo_id),
+        info.bics_set
+            ? optional(convert_vec<string>(info.bics, [](rust::String bic) { return string(bic); }))
+            : nullopt,
+        info.bank_codes_set
+            ? optional(convert_vec<string>(info.bank_codes,
+                                           [](rust::String bankCode) { return string(bankCode); }))
+            : nullopt};
+}
+
+yaxi::refresh::Error error(internal::Error const &error) {
+    switch (error.kind) {
+    case ErrorKind::RequestError:
+        return RequestError(string(error.string));
+    case ErrorKind::UnexpectedError:
+        return UnexpectedError(optional_string(error.string));
+    case ErrorKind::Canceled:
+        return Canceled();
+    case ErrorKind::InvalidCredentials:
+        return InvalidCredentials(optional_string(error.string));
+    case ErrorKind::ServiceBlocked:
+        return ServiceBlocked(optional_string(error.string),
+                              optional_code<ServiceBlocked::Code>(error.code));
+    case ErrorKind::Unauthorized:
+        return Unauthorized(optional_string(error.string));
+    case ErrorKind::AccessExceeded:
+        return AccessExceeded(optional_string(error.string));
+    case ErrorKind::PeriodOutOfBounds:
+        return PeriodOutOfBounds(optional_string(error.string));
+    case ErrorKind::UnsupportedProduct:
+        return UnsupportedProduct(optional_string(error.string),
+                                  optional_code<UnsupportedProduct::Reason>(error.code));
+    case ErrorKind::PaymentFailed:
+        return PaymentFailed(optional_string(error.string),
+                             optional_code<PaymentFailed::Code>(error.code));
+    case ErrorKind::UnexpectedValue:
+        return UnexpectedValue(string(error.string));
+    case ErrorKind::TicketError:
+        return TicketError(string(error.string), static_cast<TicketError::Code>(error.code->val));
+    case ErrorKind::ProviderError:
+        return ProviderError(optional_string(error.string),
+                             optional_code<ProviderError::Code>(error.code));
+    case ErrorKind::ResponseError:
+        return ResponseError(string(error.string));
+    case ErrorKind::NotFound:
+        return NotFound();
+    default:
+        return ResponseError(string(error.string));
+    }
+}
+
+Result<ServiceResult> service_result(internal::ServiceResult result) {
+    if (result.error) {
+        return Result<ServiceResult>(error(*result.error));
+    } else if (result.result) {
+        return Result<ServiceResult>(ServiceResult{
+            string(result.result->json),
+            optional_bytes(result.result->session),
+            optional_bytes(result.result->connection_data),
+        });
+    } else {
+        throw runtime_error("Unexpected result variant");
+    }
+}
+
+template <typename... Ts> struct overloaded : Ts... {
+    using Ts::operator()...;
+};
+template <typename... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+} // namespace
+
+const AccountField::OptionalStringField AccountField::Iban{uint8_t(internal::AccountField::Iban)};
+const AccountField::OptionalStringField AccountField::Number{
+    uint8_t(internal::AccountField::Number)};
+const AccountField::OptionalStringField AccountField::Bic{uint8_t(internal::AccountField::Bic)};
+const AccountField::OptionalStringField AccountField::BankCode{
+    uint8_t(internal::AccountField::BankCode)};
+const AccountField::CurrencyField AccountField::Currency{uint8_t(internal::AccountField::Currency)};
+const AccountField::OptionalStringField AccountField::Name{uint8_t(internal::AccountField::Name)};
+const AccountField::OptionalStringField AccountField::DisplayName{
+    uint8_t(internal::AccountField::DisplayName)};
+const AccountField::OptionalStringField AccountField::OwnerName{
+    uint8_t(internal::AccountField::OwnerName)};
+const AccountField::OptionalStringField AccountField::ProductName{
+    uint8_t(internal::AccountField::ProductName)};
+const AccountField::StatusField AccountField::Status{uint8_t(internal::AccountField::Status)};
+const AccountField::TypeField AccountField::Type{uint8_t(internal::AccountField::Type)};
+
+struct AccountFilter::Inner {
+    Inner(internal::AccountFilter inner) : inner(std::move(inner)) {}
+    internal::AccountFilter inner;
+};
+
+AccountFilter::AccountFilter(AccountFilter::Inner inner)
+    : inner(make_unique<AccountFilter::Inner>(std::move(inner))) {}
+AccountFilter::~AccountFilter() = default;
+AccountFilter::AccountFilter(AccountFilter &&) noexcept = default;
+AccountFilter &AccountFilter::operator=(AccountFilter &&) noexcept = default;
+
+AccountFilter AccountFilter::operator&&(AccountFilter &&filter) && {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        make_unique<internal::AccountFilter>(std::move(this->inner->inner)),
+        make_unique<internal::AccountFilter>(std::move(filter.inner->inner)),
+        nullptr,
+        nullptr,
+    });
+}
+
+AccountFilter AccountFilter::operator||(AccountFilter &&filter) && {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        make_unique<internal::AccountFilter>(std::move(this->inner->inner)),
+        nullptr,
+        make_unique<internal::AccountFilter>(std::move(filter.inner->inner)),
+        nullptr,
+    });
+}
+
+AccountFilter AccountFilter::supports(const SupportedService &service) {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        make_unique<SupportedService>(service),
+    });
+}
+
+AccountFilter AccountField::OptionalStringField::operator==(const optional<string> &val) const {
+    return AccountFilter(internal::AccountFilter{
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        nullptr,
+        to_ptr(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+
+AccountFilter AccountField::OptionalStringField::operator!=(const optional<string> &val) const {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        to_ptr(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+
+AccountFilter AccountField::CurrencyField::operator==(const string &val) const {
+    return AccountFilter(internal::AccountFilter{
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        nullptr,
+        make_unique<string>(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+
+AccountFilter AccountField::CurrencyField::operator!=(const string &val) const {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        make_unique<string>(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+
+AccountFilter AccountField::StatusField::operator==(const optional<AccountStatus> &val) const {
+    return AccountFilter(internal::AccountFilter{
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        nullptr,
+        nullptr,
+        to_ptr(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+AccountFilter AccountField::StatusField::operator!=(const optional<AccountStatus> &val) const {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        nullptr,
+        to_ptr(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+
+AccountFilter AccountField::TypeField::operator==(const optional<AccountType> &val) const {
+    return AccountFilter(internal::AccountFilter{
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        nullptr,
+        nullptr,
+        nullptr,
+        to_ptr(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+AccountFilter AccountField::TypeField::operator!=(const optional<AccountType> &val) const {
+    return AccountFilter(internal::AccountFilter{
+        nullptr,
+        make_unique<internal::AccountField>(static_cast<internal::AccountField>(value)),
+        nullptr,
+        nullptr,
+        to_ptr(val),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    });
+}
+
+struct RoutexRefreshClient::Inner {
+    rust::Box<internal::RoutexRefreshClient> bridge;
+
+    explicit Inner(rust::Box<internal::RoutexRefreshClient> b) : bridge(std::move(b)) {}
+};
+
+RoutexRefreshClient::RoutexRefreshClient(const optional<string> &url,
+                                         const optional<UserInSession> &userInSession)
+    : inner(make_unique<Inner>(
+          new_routex_refresh_client(to_ptr(url), to_user_in_session(userInSession)))) {}
+
+RoutexRefreshClient::~RoutexRefreshClient() = default;
+
+RoutexRefreshClient::RoutexRefreshClient(RoutexRefreshClient &&) noexcept = default;
+RoutexRefreshClient &RoutexRefreshClient::operator=(RoutexRefreshClient &&) noexcept = default;
+
+/**
+ * System version for the currently established session
+ */
+optional<string> RoutexRefreshClient::systemVersion(const string &ticketId) const {
+    return optional_string(inner->bridge->system_version(ticketId));
+};
+
+Result<vector<ConnectionInfo>> RoutexRefreshClient::search(const string &ticket,
+                                                           const vector<SearchFilter> &filters,
+                                                           bool ibanDetection,
+                                                           const optional<size_t> &limit,
+                                                           const vector<Details> &details) const {
+    auto result = inner->bridge->search(
+        ticket,
+        convert_vec<internal::SearchFilter>(
+            filters,
+            [](SearchFilter filter) {
+                return visit(
+                    overloaded{
+                        [](const CountriesSearchFilter &f) {
+                            return internal::SearchFilter{
+                                make_unique<vector<string>>(f.countries),
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                            };
+                        },
+                        [](const NameSearchFilter &f) {
+                            return internal::SearchFilter{
+                                nullptr, make_unique<string>(f.name), nullptr, nullptr, nullptr,
+                            };
+                        },
+                        [](const BicSearchFilter &f) {
+                            return internal::SearchFilter{
+                                nullptr, nullptr, make_unique<string>(f.bic), nullptr, nullptr,
+                            };
+                        },
+                        [](const BankCodeSearchFilter &f) {
+                            return internal::SearchFilter{
+                                nullptr, nullptr, nullptr, make_unique<string>(f.bankCode), nullptr,
+                            };
+                        },
+                        [](const TermSearchFilter &f) {
+                            return internal::SearchFilter{
+                                nullptr, nullptr, nullptr, nullptr, make_unique<string>(f.term),
+                            };
+                        }},
+                    filter);
+            }),
+        ibanDetection, limit ? make_unique<Usize>(Usize{std::move(*limit)}) : nullptr, details);
+
+    if (result.error) {
+        return Result<vector<ConnectionInfo>>(error(*result.error));
+    } else {
+        return Result<vector<ConnectionInfo>>(
+            convert_vec<ConnectionInfo>(result.value, convert_connection_info));
+    }
+}
+
+Result<ConnectionInfo> RoutexRefreshClient::info(const string &ticket,
+                                                 ConnectionId connectionId) const {
+    auto result = inner->bridge->info(ticket, connectionId);
+
+    if (result.error) {
+        return Result<ConnectionInfo>(error(*result.error));
+    } else {
+        return Result<ConnectionInfo>(convert_connection_info(*result.value));
+    }
+}
+
+Result<ServiceResult> RoutexRefreshClient::accounts(const ConnectionData &connectionData,
+                                                    const string &ticket,
+                                                    const vector<AccountField> &fields,
+                                                    const optional<AccountFilter> &filter,
+                                                    const optional<Session> &session) const {
+    return service_result(inner->bridge->accounts(
+        connectionData, ticket,
+        convert_vec<internal::AccountField>(
+            fields, [](uint8_t field) { return static_cast<internal::AccountField>(field); }),
+        filter ? make_unique<internal::AccountFilter>(std::move(filter->inner->inner)) : nullptr,
+        to_ptr(session)));
+}
+
+Result<ServiceResult> RoutexRefreshClient::balances(const ConnectionData &connectionData,
+                                                    const string &ticket,
+                                                    const vector<AccountReference> &accounts,
+                                                    const optional<Session> &session) const {
+    return service_result(inner->bridge->balances(
+        connectionData, ticket,
+        convert_vec<internal::AccountReference>(accounts, convert_account_reference),
+        to_ptr(session)));
+}
+
+Result<ServiceResult> RoutexRefreshClient::transactions(const ConnectionData &connectionData,
+                                                        const string &ticket,
+                                                        const optional<Session> &session) const {
+    return service_result(inner->bridge->transactions(connectionData, ticket, to_ptr(session)));
+}
+} // namespace yaxi::refresh

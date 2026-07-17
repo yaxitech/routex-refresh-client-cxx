@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <routex-refresh-client-cxxPackageRoot>$(MSBuildThisFileDirectory)..\</routex-refresh-client-cxxPackageRoot>
+
+    <routex-refresh-client-cxxIncludePath>$(routex-refresh-client-cxxPackageRoot)build\native\include\</routex-refresh-client-cxxIncludePath>
+
+    <routex-refresh-client-cxxRid Condition="'$(Platform)' == 'x64'">win-x64</routex-refresh-client-cxxRid>
+    <routex-refresh-client-cxxRid Condition="'$(Platform)' == 'Win32'">win-x86</routex-refresh-client-cxxRid>
+    <routex-refresh-client-cxxRid Condition="'$(Platform)' == 'ARM64'">win-arm64</routex-refresh-client-cxxRid>
+    <routex-refresh-client-cxxRid Condition="'$(routex-refresh-client-cxxRid)' == ''">win-x64</routex-refresh-client-cxxRid>
+
+    <routex-refresh-client-cxxNativeDir Condition="'$(Configuration)' == 'Debug'">$(routex-refresh-client-cxxPackageRoot)runtimes\$(routex-refresh-client-cxxRid)\native\debug\</routex-refresh-client-cxxNativeDir>
+    <routex-refresh-client-cxxNativeDir Condition="'$(Configuration)' != 'Debug'">$(routex-refresh-client-cxxPackageRoot)runtimes\$(routex-refresh-client-cxxRid)\native\</routex-refresh-client-cxxNativeDir>
+
+    <routex-refresh-client-cxxLibFile>$(routex-refresh-client-cxxNativeDir)routex_refresh_client_cxx.dll.lib</routex-refresh-client-cxxLibFile>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(routex-refresh-client-cxxIncludePath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+
+    <Link>
+      <AdditionalDependencies>$(routex-refresh-client-cxxLibFile);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(routex-refresh-client-cxxNativeDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>
